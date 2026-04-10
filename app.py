@@ -25,41 +25,25 @@ UMBRAL_NARANJA = 8.6
 UMBRAL_PELIGRO = 8.9
 
 
-def get_secret(nombre, default=None):
-    try:
-        return st.secrets[nombre]
-    except Exception:
-        return os.getenv(nombre, default)
+DEFAULT_ID_ESTACION = int(os.getenv("DEFAULT_ID_ESTACION", "64383"))
+DEFAULT_NOMBRE_ESTACION = os.getenv("DEFAULT_NOMBRE_ESTACION", "San Mateo")
+DEFAULT_LAT = float(os.getenv("DEFAULT_LAT", "0.7760"))
+DEFAULT_LON = float(os.getenv("DEFAULT_LON", "-79.6530"))
 
-
-# ===============================
-# PARÁMETROS GENERALES
-# ===============================
-DEFAULT_ID_ESTACION = int(get_secret("DEFAULT_ID_ESTACION", "64383"))
-DEFAULT_NOMBRE_ESTACION = get_secret("DEFAULT_NOMBRE_ESTACION", "San Mateo")
-DEFAULT_LAT = float(get_secret("DEFAULT_LAT", "0.7760"))
-DEFAULT_LON = float(get_secret("DEFAULT_LON", "-79.6530"))
-
-# ===============================
-# BASE OBSERVADOS
-# ===============================
 OBS_DB = {
-    "HOST": get_secret("OBS_DB_HOST"),
-    "PORT": int(get_secret("OBS_DB_PORT", "5432")),
-    "DATABASE": get_secret("OBS_DB_NAME"),
-    "USER": get_secret("OBS_DB_USER"),
-    "PASSWORD": get_secret("OBS_DB_PASSWORD"),
+    "HOST": os.getenv("OBS_DB_HOST", "10.0.153.201"),
+    "PORT": int(os.getenv("OBS_DB_PORT", "5432")),
+    "DATABASE": os.getenv("OBS_DB_NAME", "bandahm"),
+    "USER": os.getenv("OBS_DB_USER", "jupyter"),
+    "PASSWORD": os.getenv("OBS_DB_PASSWORD", "zagG3@rcah"),
 }
 
-# ===============================
-# BASE PRONÓSTICO
-# ===============================
 PRON_DB = {
-    "HOST": get_secret("PRON_DB_HOST"),
-    "PORT": int(get_secret("PRON_DB_PORT", "5432")),
-    "DATABASE": get_secret("PRON_DB_NAME"),
-    "USER": get_secret("PRON_DB_USER"),
-    "PASSWORD": get_secret("PRON_DB_PASSWORD"),
+    "HOST": os.getenv("PRON_DB_HOST", "10.0.153.95"),
+    "PORT": int(os.getenv("PRON_DB_PORT", "5432")),
+    "DATABASE": os.getenv("PRON_DB_NAME", "bandahm_pron"),
+    "USER": os.getenv("PRON_DB_USER", "dpa_pronostico_wrf"),
+    "PASSWORD": os.getenv("PRON_DB_PASSWORD", "fR8#x2Lq"),
 }
 TABLA_OBS = 'automaticas."_014101601h"'
 TABLA_PRED = 'hm_model_forecast."_017146601h"'
