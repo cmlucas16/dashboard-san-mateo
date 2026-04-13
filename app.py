@@ -24,7 +24,6 @@ UMBRAL_AMARILLA = 8.3
 UMBRAL_NARANJA = 8.6
 UMBRAL_PELIGRO = 8.9
 
-
 DEFAULT_ID_ESTACION = int(os.getenv("DEFAULT_ID_ESTACION", "64383"))
 DEFAULT_NOMBRE_ESTACION = os.getenv("DEFAULT_NOMBRE_ESTACION", "San Mateo")
 DEFAULT_LAT = float(os.getenv("DEFAULT_LAT", "0.7760"))
@@ -45,6 +44,7 @@ PRON_DB = {
     "USER": os.getenv("PRON_DB_USER", "dpa_pronostico_wrf"),
     "PASSWORD": os.getenv("PRON_DB_PASSWORD", "fR8#x2Lq"),
 }
+
 TABLA_OBS = 'automaticas."_014101601h"'
 TABLA_PRED = 'hm_model_forecast."_017146601h"'
 
@@ -73,12 +73,18 @@ def query_to_dataframe(query: str, params: dict) -> pd.DataFrame:
             database=params["DATABASE"],
             user=params["USER"],
             password=params["PASSWORD"],
+            connect_timeout=8,
         )
         cursor = conn.cursor()
         cursor.execute(query)
         rows = cursor.fetchall()
         colnames = [desc[0] for desc in cursor.description]
         return pd.DataFrame(rows, columns=colnames)
+
+    except Exception as e:
+        raise RuntimeError(
+            f"Fallo de conexión/consulta a {params['HOST']}:{params['PORT']} / {params['DATABASE']}: {e}"
+        ) from e
 
     finally:
         if cursor is not None:
@@ -404,33 +410,70 @@ fecha_inicio_obs = fecha_inicio_local.tz_convert("UTC").strftime("%Y-%m-%d %H:%M
 fecha_fin = fecha_fin_local.tz_convert("UTC").strftime("%Y-%m-%d %H:%M:%S")
 fecha_inicio_pred = (fecha_inicio_local - pd.Timedelta(hours=3)).tz_convert("UTC").strftime("%Y-%m-%d %H:%M:%S")
 
-try:
-    if refrescar:
-        st.cache_data.clear()
+if refrescar:
+    st.cache_data.clear()
 
-    with st.spinner("Consultando datos..."):
+# ============================================================
+# CARGA ROBUSTA DE DATOS
+# ============================================================
+df_obs = pd.DataFrame()
+df_pred = pd.DataFrame()
+df_comp = pd.DataFrame()
+metricas = {"mae": np.nan, "rmse": np.nan, "sesgo": np.nan, "n_comp": 0}
+
+error_obs = None
+error_pred = None
+error_comp = None
+
+with st.spinner("Consultando datos..."):
+    try:
         df_obs = cargar_observados(int(id_estacion), fecha_inicio_obs, fecha_fin)
+    except Exception as e:
+        error_obs = str(e)
+
+    try:
         df_pred = cargar_predicciones(int(id_estacion), fecha_inicio_pred, fecha_fin)
+    except Exception as e:
+        error_pred = str(e)
+
+    try:
         df_comp = construir_comparacion(df_obs, df_pred)
         metricas = calcular_metricas(df_comp)
+    except Exception as e:
+        error_comp = str(e)
+        df_comp = pd.DataFrame()
+        metricas = {"mae": np.nan, "rmse": np.nan, "sesgo": np.nan, "n_comp": 0}
+
+ultimo_obs = df_obs.iloc[-1]["observado_horario"] if not df_obs.empty else np.nan
+ultima_pred = df_pred.iloc[-1]["pred_3h"] if not df_pred.empty else np.nan
+ultimo_estado = calcular_estado(ultimo_obs)
+ultimo_error = (ultima_pred - ultimo_obs) if pd.notna(ultimo_obs) and pd.notna(ultima_pred) else np.nan
+
+tab1, tab2, tab3, tab4 = st.tabs([
+    "Monitoreo operativo",
+    "Resumen del proyecto",
+    "Automatización",
+    "Boletines"
+])
+
+with tab1:
+    st.subheader("Monitoreo operativo")
+
+    if error_obs:
+        st.warning(f"No fue posible consultar datos observados. {error_obs}")
+
+    if error_pred:
+        st.warning(f"No fue posible consultar predicciones. {error_pred}")
+
+    if error_comp:
+        st.warning(f"No fue posible construir la comparación observación-predicción. {error_comp}")
 
     if df_obs.empty and df_pred.empty:
-        st.warning("No se encontraron datos para el rango seleccionado.")
-        st.stop()
-
-    ultimo_obs = df_obs.iloc[-1]["observado_horario"] if not df_obs.empty else np.nan
-    ultima_pred = df_pred.iloc[-1]["pred_3h"] if not df_pred.empty else np.nan
-    ultimo_estado = calcular_estado(ultimo_obs)
-    ultimo_error = (ultima_pred - ultimo_obs) if pd.notna(ultimo_obs) and pd.notna(ultima_pred) else np.nan
-
-    tab1, tab2, tab3, tab4 = st.tabs([
-        "Monitoreo operativo",
-        "Resumen del proyecto",
-        "Automatización",
-        "Boletines"
-    ])
-
-    with tab1:
+        st.info(
+            "No hay datos operativos disponibles en este momento. "
+            "El resto del dashboard continúa accesible."
+        )
+    else:
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Último observado", f"{ultimo_obs:.3f} m" if pd.notna(ultimo_obs) else "Sin dato")
         c2.metric("Última predicción +3h", f"{ultima_pred:.3f} m" if pd.notna(ultima_pred) else "Sin dato")
@@ -440,20 +483,32 @@ try:
         top_left, top_right = st.columns([2.8, 1.2])
 
         with top_left:
-            st.plotly_chart(
-                construir_figura(df_obs, df_pred, DEFAULT_NOMBRE_ESTACION),
-                use_container_width=True
-            )
+            try:
+                st.plotly_chart(
+                    construir_figura(df_obs, df_pred, DEFAULT_NOMBRE_ESTACION),
+                    use_container_width=True
+                )
+            except Exception as e:
+                st.warning(f"No fue posible construir la gráfica principal: {e}")
 
         with top_right:
             st.subheader("Estación hidrológica")
             st.write(f"**Nombre:** {DEFAULT_NOMBRE_ESTACION}")
             st.write(f"**ID:** {int(id_estacion)}")
 
-            st.plotly_chart(
-                construir_mapa(DEFAULT_NOMBRE_ESTACION, float(lat_estacion), float(lon_estacion), ultimo_obs, ultimo_estado),
-                use_container_width=True,
-            )
+            try:
+                st.plotly_chart(
+                    construir_mapa(
+                        DEFAULT_NOMBRE_ESTACION,
+                        float(lat_estacion),
+                        float(lon_estacion),
+                        ultimo_obs,
+                        ultimo_estado
+                    ),
+                    use_container_width=True,
+                )
+            except Exception as e:
+                st.warning(f"No fue posible construir el mapa: {e}")
 
             st.write("**Lectura rápida**")
             st.write(f"Nivel observado: {f'{ultimo_obs:.3f} m' if pd.notna(ultimo_obs) else 'Sin dato'}")
@@ -468,204 +523,200 @@ try:
         m4.metric("Sesgo", f"{metricas['sesgo']:+.3f} m" if pd.notna(metricas["sesgo"]) else "Sin dato")
 
         with st.expander("Ver tabla comparativa cada 3 horas", expanded=True):
-            mostrar = df_comp.copy()
-            if not mostrar.empty:
+            if df_comp.empty:
+                st.info("No hay comparación disponible para el rango seleccionado.")
+            else:
+                mostrar = df_comp.copy()
                 mostrar["fecha_local"] = pd.to_datetime(mostrar["fecha_local"], errors="coerce")
-            st.dataframe(
-                mostrar.sort_values("fecha_local", ascending=False),
-                use_container_width=True,
-                hide_index=True,
-            )
+                st.dataframe(
+                    mostrar.sort_values("fecha_local", ascending=False),
+                    use_container_width=True,
+                    hide_index=True,
+                )
 
-    with tab2:
-        st.subheader("Resumen del proyecto")
+with tab2:
+    st.subheader("Resumen del proyecto")
 
-        r1, r2 = st.columns(2)
+    r1, r2 = st.columns(2)
 
-        with r1:
-            st.markdown("**Objetivo**")
-            st.write(
-                "Fortalecer el monitoreo y la alerta temprana en la cuenca del río Esmeraldas "
-                "mediante la integración de información hidrometeorológica, modelación predictiva "
-                "y visualización operativa."
-            )
-
-        with r2:
-            st.markdown("**Enfoque del trabajo**")
-            st.write(
-                "El desarrollo integra consulta de datos, procesamiento, predicción, comparación "
-                "con observaciones y visualización en un solo entorno, facilitando el seguimiento "
-                "y la comunicación de resultados."
-            )
-
-        st.markdown("### Componentes principales")
-        c1, c2, c3, c4 = st.columns(4)
-
-        with c1:
-            st.markdown("**Datos**")
-            st.write(
-                "Integración de información observada y de apoyo para consolidar una base útil para análisis y operación."
-            )
-
-        with c2:
-            st.markdown("**Modelo**")
-            st.write(
-                "Generación de predicción de nivel a corto plazo como apoyo al seguimiento hidrológico."
-            )
-
-        with c3:
-            st.markdown("**Visualización**")
-            st.write(
-                "Construcción de un visor que permite revisar nivel observado, predicción, estado y métricas."
-            )
-
-        with c4:
-            st.markdown("**Aplicación**")
-            st.write(
-                "Uso del sistema como insumo para monitoreo, análisis técnico y apoyo a la toma de decisiones."
-            )
-
-        st.markdown("### ¿Qué se ha trabajado?")
-        a1, a2, a3 = st.columns(3)
-
-        with a1:
-            st.markdown("**Desarrollo técnico**")
-            st.markdown(
-                "- Consulta y organización de datos\n"
-                "- Preparación de información para el modelo\n"
-                "- Generación de predicción operativa\n"
-                "- Comparación con observaciones"
-            )
-
-        with a2:
-            st.markdown("**Visualización**")
-            st.markdown(
-                "- Diseño de dashboard\n"
-                "- Métricas resumidas\n"
-                "- Gráfico de seguimiento\n"
-                "- Ubicación geográfica de la estación"
-            )
-
-        with a3:
-            st.markdown("**Valor agregado**")
-            st.markdown(
-                "- Comunicación más clara de resultados\n"
-                "- Información centralizada\n"
-                "- Base para automatización\n"
-                "- Soporte a productos institucionales"
-            )
-
-        st.info(
-            "El proyecto integra datos, procesamiento, predicción y visualización en una sola herramienta, "
-            "permitiendo transformar información dispersa en un apoyo operativo más claro y oportuno."
-        )
-
-    with tab3:
-        st.subheader("Automatización del proceso")
-
-        st.markdown("### Flujo general automatizado")
+    with r1:
+        st.markdown("**Objetivo**")
         st.write(
-            "Datos observados → Procesamiento → Modelo predictivo → "
-            "Almacenamiento → Visualización → Soporte a decisiones"
+            "Fortalecer el monitoreo y la alerta temprana en la cuenca del río Esmeraldas "
+            "mediante la integración de información hidrometeorológica, modelación predictiva "
+            "y visualización operativa."
         )
 
-        p1, p2, p3, p4 = st.columns(4)
-
-        with p1:
-            st.markdown("**1. Ingesta**")
-            st.write(
-                "Consulta de datos desde las fuentes disponibles y recuperación de información necesaria para el análisis."
-            )
-
-        with p2:
-            st.markdown("**2. Procesamiento**")
-            st.write(
-                "Transformación temporal, validación y organización de los datos para su uso en el flujo operativo."
-            )
-
-        with p3:
-            st.markdown("**3. Predicción**")
-            st.write(
-                "Ejecución del modelo para estimar el nivel esperado a 3 horas y generar una salida útil para seguimiento."
-            )
-
-        with p4:
-            st.markdown("**4. Visualización y uso**")
-            st.write(
-                "Actualización del dashboard, revisión de métricas y disponibilidad de resultados para apoyo técnico."
-            )
-
-        st.markdown("### Beneficios operativos")
-        b1, b2, b3, b4 = st.columns(4)
-
-        with b1:
-            st.write("Reduce trabajo manual")
-
-        with b2:
-            st.write("Mejora la oportunidad de la información")
-
-        with b3:
-            st.write("Centraliza el seguimiento en un solo visor")
-
-        with b4:
-            st.write("Sirve como base para escalar a otros productos")
-
-        z1, z2 = st.columns([1.45, 1])
-
-        with z1:
-            st.markdown("**¿Qué permite esta automatización?**")
-            st.write(
-                "Permite que la consulta de datos, el procesamiento, la generación de predicciones "
-                "y la visualización de resultados se integren en un flujo más ordenado, reduciendo "
-                "dependencia de pasos manuales y facilitando el monitoreo operativo."
-            )
-
-        with z2:
-            st.markdown("**Proyección**")
-            st.write(
-                "Esta base puede ampliarse para fortalecer la actualización periódica, la generación "
-                "de productos técnicos y el soporte a procesos institucionales de alerta y seguimiento."
-            )
-
-        st.success(
-            "La automatización mejora la eficiencia del flujo técnico y también fortalece la comunicación "
-            "de resultados y su aprovechamiento operativo."
+    with r2:
+        st.markdown("**Enfoque del trabajo**")
+        st.write(
+            "El desarrollo integra consulta de datos, procesamiento, predicción, comparación "
+            "con observaciones y visualización en un solo entorno, facilitando el seguimiento "
+            "y la comunicación de resultados."
         )
 
-    with tab4:
-        st.subheader("Boletines automatizados")
+    st.markdown("### Componentes principales")
+    c1, c2, c3, c4 = st.columns(4)
 
-        mostrar_bloque_pdf(
-            titulo="Boletín Monitoreo Hidrometeorológico - Esmeraldas diario",
-            descripcion=(
-                "En el marco del Proyecto AdaptaClima, desde el Instituto Nacional de Meteorología "
-                "e Hidrología (INAMHI) nos permitimos remitir el Boletín de Monitoreo Hidrometeorológico "
-                "de la provincia de Esmeraldas, el cual presenta información actualizada sobre el "
-                "comportamiento de las variables meteorológicas e hidrológicas registradas en diversas "
-                "estaciones de la provincia.\n\n"
-                "El boletín incluye además el pronóstico de lluvias derivado del modelo numérico WRF, "
-                "como insumo técnico para el seguimiento de las condiciones atmosféricas y la planificación "
-                "de acciones preventivas."
-            ),
-            ruta_pdf=PDF_BOLETIN_1
+    with c1:
+        st.markdown("**Datos**")
+        st.write(
+            "Integración de información observada y de apoyo para consolidar una base útil para análisis y operación."
         )
 
-        st.markdown("---")
-
-        mostrar_bloque_pdf(
-            titulo="Boletín Monitoreo Hidrometeorológico - Esmeraldas eventual",
-            descripcion=(
-                "Este boletín eventual comparte información de las últimas 6 horas, siempre y cuando "
-                "el nivel del río supere un umbral de precaución.\n\n"
-                "En este producto se integra una tabla con valores cada 30 minutos correspondientes a "
-                "las últimas 6 horas, junto con la imagen del comportamiento observado del nivel del río, "
-                "como apoyo al seguimiento de la situación hidrológica."
-            ),
-            ruta_pdf=PDF_BOLETIN_2
+    with c2:
+        st.markdown("**Modelo**")
+        st.write(
+            "Generación de predicción de nivel a corto plazo como apoyo al seguimiento hidrológico."
         )
 
-except Exception as e:
-    st.error(f"Error al cargar el dashboard: {e}")
+    with c3:
+        st.markdown("**Visualización**")
+        st.write(
+            "Construcción de un visor que permite revisar nivel observado, predicción, estado y métricas."
+        )
+
+    with c4:
+        st.markdown("**Aplicación**")
+        st.write(
+            "Uso del sistema como insumo para monitoreo, análisis técnico y apoyo a la toma de decisiones."
+        )
+
+    st.markdown("### ¿Qué se ha trabajado?")
+    a1, a2, a3 = st.columns(3)
+
+    with a1:
+        st.markdown("**Desarrollo técnico**")
+        st.markdown(
+            "- Consulta y organización de datos\n"
+            "- Preparación de información para el modelo\n"
+            "- Generación de predicción operativa\n"
+            "- Comparación con observaciones"
+        )
+
+    with a2:
+        st.markdown("**Visualización**")
+        st.markdown(
+            "- Diseño de dashboard\n"
+            "- Métricas resumidas\n"
+            "- Gráfico de seguimiento\n"
+            "- Ubicación geográfica de la estación"
+        )
+
+    with a3:
+        st.markdown("**Valor agregado**")
+        st.markdown(
+            "- Comunicación más clara de resultados\n"
+            "- Información centralizada\n"
+            "- Base para automatización\n"
+            "- Soporte a productos institucionales"
+        )
+
     st.info(
-        "Verifica variables de entorno, acceso a red institucional, credenciales y existencia de las tablas."
+        "El proyecto integra datos, procesamiento, predicción y visualización en una sola herramienta, "
+        "permitiendo transformar información dispersa en un apoyo operativo más claro y oportuno."
+    )
+
+with tab3:
+    st.subheader("Automatización del proceso")
+
+    st.markdown("### Flujo general automatizado")
+    st.write(
+        "Datos observados → Procesamiento → Modelo predictivo → "
+        "Almacenamiento → Visualización → Soporte a decisiones"
+    )
+
+    p1, p2, p3, p4 = st.columns(4)
+
+    with p1:
+        st.markdown("**1. Ingesta**")
+        st.write(
+            "Consulta de datos desde las fuentes disponibles y recuperación de información necesaria para el análisis."
+        )
+
+    with p2:
+        st.markdown("**2. Procesamiento**")
+        st.write(
+            "Transformación temporal, validación y organización de los datos para su uso en el flujo operativo."
+        )
+
+    with p3:
+        st.markdown("**3. Predicción**")
+        st.write(
+            "Ejecución del modelo para estimar el nivel esperado a 3 horas y generar una salida útil para seguimiento."
+        )
+
+    with p4:
+        st.markdown("**4. Visualización y uso**")
+        st.write(
+            "Actualización del dashboard, revisión de métricas y disponibilidad de resultados para apoyo técnico."
+        )
+
+    st.markdown("### Beneficios operativos")
+    b1, b2, b3, b4 = st.columns(4)
+
+    with b1:
+        st.write("Reduce trabajo manual")
+
+    with b2:
+        st.write("Mejora la oportunidad de la información")
+
+    with b3:
+        st.write("Centraliza el seguimiento en un solo visor")
+
+    with b4:
+        st.write("Sirve como base para escalar a otros productos")
+
+    z1, z2 = st.columns([1.45, 1])
+
+    with z1:
+        st.markdown("**¿Qué permite esta automatización?**")
+        st.write(
+            "Permite que la consulta de datos, el procesamiento, la generación de predicciones "
+            "y la visualización de resultados se integren en un flujo más ordenado, reduciendo "
+            "dependencia de pasos manuales y facilitando el monitoreo operativo."
+        )
+
+    with z2:
+        st.markdown("**Proyección**")
+        st.write(
+            "Esta base puede ampliarse para fortalecer la actualización periódica, la generación "
+            "de productos técnicos y el soporte a procesos institucionales de alerta y seguimiento."
+        )
+
+    st.success(
+        "La automatización mejora la eficiencia del flujo técnico y también fortalece la comunicación "
+        "de resultados y su aprovechamiento operativo."
+    )
+
+with tab4:
+    st.subheader("Boletines automatizados")
+
+    mostrar_bloque_pdf(
+        titulo="Boletín Monitoreo Hidrometeorológico - Esmeraldas diario",
+        descripcion=(
+            "En el marco del Proyecto AdaptaClima, desde el Instituto Nacional de Meteorología "
+            "e Hidrología (INAMHI) nos permitimos remitir el Boletín de Monitoreo Hidrometeorológico "
+            "de la provincia de Esmeraldas, el cual presenta información actualizada sobre el "
+            "comportamiento de las variables meteorológicas e hidrológicas registradas en diversas "
+            "estaciones de la provincia.\n\n"
+            "El boletín incluye además el pronóstico de lluvias derivado del modelo numérico WRF, "
+            "como insumo técnico para el seguimiento de las condiciones atmosféricas y la planificación "
+            "de acciones preventivas."
+        ),
+        ruta_pdf=PDF_BOLETIN_1
+    )
+
+    st.markdown("---")
+
+    mostrar_bloque_pdf(
+        titulo="Boletín Monitoreo Hidrometeorológico - Esmeraldas eventual",
+        descripcion=(
+            "Este boletín eventual comparte información de las últimas 6 horas, siempre y cuando "
+            "el nivel del río supere un umbral de precaución.\n\n"
+            "En este producto se integra una tabla con valores cada 30 minutos correspondientes a "
+            "las últimas 6 horas, junto con la imagen del comportamiento observado del nivel del río, "
+            "como apoyo al seguimiento de la situación hidrológica."
+        ),
+        ruta_pdf=PDF_BOLETIN_2
     )
